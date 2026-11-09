@@ -4,6 +4,7 @@
 
 #include <audiopolicy.h>
 #include <endpointvolume.h>
+#include <propkeydef.h> // DEFINE_PROPERTYKEY must precede the device property keys in the Windows SDK.
 #include <functiondiscoverykeys_devpkey.h>
 #include <mmdeviceapi.h>
 #include <propvarutil.h>
