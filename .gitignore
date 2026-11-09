@@ -1,0 +1,8 @@
+/build/
+/out/
+/dist/
+/.vs/
+/.idea/
+*.user
+*.suo
+*.pdb
