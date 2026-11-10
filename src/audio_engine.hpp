@@ -17,6 +17,8 @@ public:
     bool Start(HWND listener);
     void Stop();
     AudioSnapshot Snapshot();
+    // App values use the output's slider range. Raising one above its output
+    // raises that output while preserving the other apps' displayed levels.
     std::uint64_t SetVolume(const std::wstring& id, float scalar);
     void ToggleMute(const std::wstring& id);
     void Refresh();

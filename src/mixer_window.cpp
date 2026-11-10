@@ -148,8 +148,9 @@ struct MixerWindow::Row {
         const int percent = VolumePercent(value.volume);
         const int position = app->settings_.vertical ? 100 - percent : percent;
         if (!tracking && GetCapture() != slider && SendMessageW(slider, TBM_GETPOS, 0, 0) != position) {
-            SendMessageW(slider, TBM_SETPOS, FALSE, position);
-            InvalidateRect(slider, nullptr, FALSE);
+            // Recalculate the native thumb rectangle as well as the logical
+            // value: custom painting uses TBM_GETTHUMBRECT for its position.
+            SendMessageW(slider, TBM_SETPOS, TRUE, position);
         }
         UpdateMuteName();
         const bool enabled = value.id != kMasterId || app->snapshot_.deviceAvailable;
@@ -601,9 +602,9 @@ void MixerWindow::Paint() {
     Text(dc, boldFont_, colors_.text, settingsView_ ? L"Configurações" : L"TinyVolumeMixer",
          {Px(18), Px(12), rect.right - Px(146), Px(42)});
     Fill(dc, {Px(16), Px(51), rect.right - Px(16), Px(52)}, colors_.border);
-    const auto footer = settingsView_ ? L"TinyVolumeMixer · v0.2.0" :
+    const auto footer = settingsView_ ? L"TinyVolumeMixer · v1.0.0" :
         !feedback_.empty() ? feedback_ : !snapshot_.error.empty() ? snapshot_.error :
-        snapshot_.deviceAvailable ? L"Saída padrão: " + snapshot_.deviceName : L"TinyVolumeMixer · v0.2.0";
+        snapshot_.deviceAvailable ? L"Saída padrão: " + snapshot_.deviceName : L"TinyVolumeMixer · v1.0.0";
     const bool error = !settingsView_ && (!feedback_.empty() ? feedbackError_ : !snapshot_.error.empty());
     Text(dc, smallFont_, error ? colors_.error : colors_.secondary, footer,
          {Px(18), rect.bottom - Px(30), rect.right - Px(18), rect.bottom - Px(7)});

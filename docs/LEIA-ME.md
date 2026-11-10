@@ -13,9 +13,11 @@ O botão com três linhas muda a orientação das barras. O botão circular de t
 
 Se o atalho escolhido já estiver em uso, uma mensagem aparece e o atalho anterior continua funcionando. No menu do botão direito da bandeja, **Sair** encerra o aplicativo.
 
+As barras seguem o mixer clássico do Windows. Ao baixar o geral, os aplicativos daquela saída descem proporcionalmente. Por exemplo, com o geral em **50%**, um app que utiliza todo o volume disponível aparece em **50%**; um app que utiliza metade aparece em **25%**. Ao aumentar um app acima do geral, o geral sobe junto e os demais apps mantêm o nível que estavam exibindo. Levar o geral a zero e depois aumentá-lo preserva as proporções entre os aplicativos.
+
 Programas com várias sessões de áudio compartilham uma barra. Quando os volumes são diferentes, mostramos o maior; mover a barra aplica o volume a todas as sessões daquele programa. Aumentar a barra acima de zero também retira o mudo. Sessões pausadas continuam visíveis enquanto existirem no Windows.
 
-O **volume geral** acompanha a saída multimídia padrão. Os **aplicativos** incluem sessões em todas as saídas ativas, mesmo quando um programa está usando outro dispositivo. Ao trocar entre fone e caixas de som, a lista acompanha as notificações do Windows. Sem uma saída disponível, a janela informa a situação e oferece tentar novamente.
+O **volume geral** acompanha a saída multimídia padrão. Os **aplicativos** incluem sessões em todas as saídas ativas, mesmo quando um programa está usando outro dispositivo. Cada aplicativo acompanha o volume da saída onde está tocando; um aplicativo em outro dispositivo pode aparecer acima do geral da saída padrão. Ao trocar entre fone e caixas de som, a lista acompanha as notificações do Windows. Sem uma saída disponível, a janela informa a situação e oferece tentar novamente.
 
 Aplicativos da Microsoft Store usam o nome e o ícone do cadastro do Windows. O áudio de um componente WebView2 aparece no controle do aplicativo que o utiliza, quando essa identificação está disponível. Assim, o WhatsApp pode ter suas sessões reunidas em **WhatsApp**, em vez de exibir **WhatsApp.Root** e uma linha separada do runtime.
 
@@ -34,7 +36,7 @@ ctest --preset release
 
 Para iniciar sem abrir a janela, use `TinyVolumeMixer.exe --background`.
 
-O GitHub Actions prepara o ZIP portátil e o checksum. Uma tag de versão, como `v0.2.0`, aciona a publicação da release; um build local não publica arquivos no GitHub.
+O GitHub Actions prepara o ZIP portátil e o checksum. Uma tag de versão, como `v1.0.0`, aciona a publicação da release; um build local não publica arquivos no GitHub.
 
 ## Desinstalar
 

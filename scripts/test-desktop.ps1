@@ -79,6 +79,28 @@ function FindRow($handle,$name) {
   },[IntPtr]::Zero)|Out-Null
   return $script:foundRow
 }
+function ThumbCenter($slider,$vertical) {
+  $rect=New-Object TVMNative+Rect
+  [TVMNative]::GetWindowRect($slider,[ref]$rect)|Out-Null
+  $width=$rect.Right-$rect.Left;$height=$rect.Bottom-$rect.Top
+  $bitmap=New-Object System.Drawing.Bitmap $width,$height
+  $graphics=[System.Drawing.Graphics]::FromImage($bitmap);$dc=$graphics.GetHdc()
+  try {
+    [TVMNative]::PrintWindow($slider,$dc,2)|Out-Null
+    $graphics.ReleaseHdc($dc);$dc=[IntPtr]::Zero
+    # Scan the painted white thumb in the dark theme, excluding the focus border.
+    $sum=0;$count=0;$length=if($vertical){$height}else{$width}
+    for($pixel=2;$pixel -lt $length-2;$pixel++){
+      $color=if($vertical){$bitmap.GetPixel([int]($width/2),$pixel)}else{$bitmap.GetPixel($pixel,[int]($height/2))}
+      if($color.R -gt 220 -and $color.G -gt 220 -and $color.B -gt 220){$sum+=$pixel;$count++}
+    }
+    if($count -eq 0){throw 'No painted slider thumb found'}
+    return $sum/$count
+  }finally{
+    if($dc -ne [IntPtr]::Zero){$graphics.ReleaseHdc($dc)}
+    $graphics.Dispose();$bitmap.Dispose()
+  }
+}
 function Shot($handle,$name) {
   if (!$CaptureScreenshots) { return }
   [TVMNative]::SetForegroundWindow($handle) | Out-Null
@@ -172,9 +194,49 @@ try {
     Check ($row -ne [IntPtr]::Zero) 'late audio sessions create a real application row'
     $slider=[TVMNative]::GetDlgItem($row,2);$mute=[TVMNative]::GetDlgItem($row,1)
     $vertical=(Get-ItemProperty $regPath).Vertical -eq 1
+    $masterRow=FindRow $h 'Volume geral'
+    $masterSlider=[TVMNative]::GetDlgItem($masterRow,2)
+    $masterPosition=[int][TVMNative]::SendMessage($masterSlider,0x0400,[IntPtr]::Zero,[IntPtr]::Zero)
+    $masterPercent=if($vertical){100-$masterPosition}else{$masterPosition}
+    if($masterPercent -gt 2){
+      # Inspect the painted thumb position, not only TBM_GETPOS.
+      # External changes exercise the same follower update used by master changes.
+      foreach($orientation in @($true,$false)){
+        if($vertical -ne $orientation){
+          [TVMNative]::SendMessage($h,0x0111,[IntPtr]101,[IntPtr]::Zero)|Out-Null
+          $vertical=$orientation
+        }
+        [TVMNative]::SendMessage($h,$show,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+        $row=FindRow $h 'tvm_audio_smoke'
+        $slider=[TVMNative]::GetDlgItem($row,2)
+        $zeroPosition=if($vertical){100}else{0}
+        [TVMNative]::SendMessage($slider,0x0405,[IntPtr]1,[IntPtr]$zeroPosition)|Out-Null
+        [TVMNative]::SendMessage($row,0x0114,[IntPtr]8,$slider)|Out-Null
+        Start-Sleep -Milliseconds 300
+        Check ([TVMNative]::IsWindowVisible($h)) 'popup remains open before the external change'
+        $before=ThumbCenter $slider $vertical
+        $producer.StandardInput.Write('v');$producer.StandardInput.Flush()
+        $expected=[int][Math]::Round(0.67*$masterPercent)
+        $moved=$false
+        for($attempt=0;$attempt -lt 100;$attempt++){
+          Start-Sleep -Milliseconds 50
+          $logical=[int][TVMNative]::SendMessage($slider,0x0400,[IntPtr]::Zero,[IntPtr]::Zero)
+          if($vertical){$logical=100-$logical}
+          $center=ThumbCenter $slider $vertical
+          $direction=if($vertical){$before-$center}else{$center-$before}
+          if([Math]::Abs($logical-$expected) -le 1 -and $direction -gt 0){$moved=$true;break}
+        }
+        $axis=if($vertical){'vertical'}else{'horizontal'}
+        Check $moved "external volume moves the $axis thumb while the popup remains open (logical=$logical expected=$expected center=$before->$center visible=$([TVMNative]::IsWindowVisible($h)))"
+      }
+    }
+    $row=FindRow $h 'tvm_audio_smoke'
+    $slider=[TVMNative]::GetDlgItem($row,2);$mute=[TVMNative]::GetDlgItem($row,1)
     for($i=1;$i -le 80;$i++){
-      $position=if($vertical){100-$i}else{$i}
-      [TVMNative]::SendMessage($slider,0x0405,[IntPtr]::Zero,[IntPtr]$position)|Out-Null
+      # Stay below the output so this painting check never raises the master.
+      $level=[int][Math]::Floor($i*$masterPercent/100)
+      $position=if($vertical){100-$level}else{$level}
+      [TVMNative]::SendMessage($slider,0x0405,[IntPtr]1,[IntPtr]$position)|Out-Null
       [TVMNative]::SendMessage($row,0x0114,[IntPtr]5,$slider)|Out-Null
       Start-Sleep -Milliseconds 2
     }

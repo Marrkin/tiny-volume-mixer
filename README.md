@@ -13,6 +13,7 @@ C++20 · Win32 + Common Controls + GDI+ · Windows Core Audio · MIT
 ## What it does
 
 - Master output volume and mute, plus one control per application.
+- Linked sliders like the classic Windows mixer: apps follow their output, and raising an app past it raises that output while keeping other apps at their displayed levels.
 - A compact popup with light, dark, and automatic Windows themes. Click outside or press Esc to hide it.
 - Smooth circular controls and buffered painting; volume updates preserve app labels and icons.
 - Horizontal or vertical sliders, with scrolling for longer application lists.
@@ -54,7 +55,7 @@ The MSVC runtime is linked statically (`/MT`). Only Windows system DLLs are requ
 cmake --install build/windows-x64 --config Release --prefix dist/portable
 ```
 
-The GitHub Actions workflow builds and tests with MSVC on Windows. It uploads a portable ZIP and SHA-256 checksum. Pushing a version tag such as `v0.2.0` also creates a GitHub Release with those files. Nothing is published by a local build.
+The GitHub Actions workflow builds and tests with MSVC on Windows. It uploads a portable ZIP and SHA-256 checksum. Pushing a version tag such as `v1.0.0` also creates a GitHub Release with those files. Nothing is published by a local build.
 
 Linux contributors can cross-build with [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw) and Ninja:
 

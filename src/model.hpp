@@ -17,13 +17,14 @@ struct SessionInfo {
     bool active = false;
     bool systemSounds = false;
     std::wstring appId{};
+    float outputVolume = 1.0f;
 };
 
 struct AppVolume {
     std::wstring id;
     std::wstring name;
     std::wstring executable;
-    float volume = 0.0f;
+    float volume = 0.0f; // Slider level relative to the full output range, as in SndVol.
     bool muted = false;
     bool active = false;
     bool mixed = false;
@@ -43,5 +44,7 @@ struct AudioSnapshot {
 
 std::wstring GroupId(const SessionInfo& session);
 std::vector<AppVolume> GroupSessions(const std::vector<SessionInfo>& sessions);
+float AppSliderVolume(float sessionVolume, float outputVolume);
+float SessionVolumeForSlider(float sliderVolume, float outputVolume);
 int VolumePercent(float scalar);
 } // namespace tvm

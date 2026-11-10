@@ -55,6 +55,40 @@ int main() {
     otherInstall.appId = L"example.package!application";
     Check(GroupId(packaged) == GroupId(otherInstall), "packaged runtime and host share their Windows application identity");
     Check(GroupSessions({packaged,otherInstall})[0].appId == packaged.appId, "application identity is retained for the shell icon");
+    Check(VolumePercent(AppSliderVolume(1.0f, 0.5f)) == 50,
+          "a full-volume app follows the output slider down to 50");
+    Check(VolumePercent(AppSliderVolume(0.4f, 0.5f)) == 20,
+          "lowering the output preserves the balance between apps");
+    Check(VolumePercent(SessionVolumeForSlider(0.2f, 0.5f)) == 40,
+          "an app slider at 20 with output at 50 writes session volume 40");
+    const auto relative = SessionVolumeForSlider(0.23f, 0.5f);
+    Check(VolumePercent(AppSliderVolume(relative, 0.5f)) == 23,
+          "displayed levels round trip through the session control");
+    Check(AppSliderVolume(0.7f, 0.0f) == 0.0f &&
+          VolumePercent(AppSliderVolume(0.7f, 1.0f)) == 70,
+          "taking the output to zero and back retains session ratios");
+    Check(SessionVolumeForSlider(0.0f, 0.0f) == 0.0f,
+          "a silent output never causes division by zero");
+    const auto held = SessionVolumeForSlider(AppSliderVolume(0.4f, 0.5f), 0.8f);
+    Check(VolumePercent(AppSliderVolume(held, 0.8f)) == 20,
+          "raising one app past the output leaves another app at its old level");
+    Check(SessionVolumeForSlider(0.8f, 0.8f) == 1.0f,
+          "the app that raises the output reaches that output's new level");
+    browser1.volume = 0.4f; browser1.outputVolume = 0.5f;
+    browser2.volume = 0.25f; browser2.outputVolume = 0.8f;
+    browser1.muted = browser2.muted = false;
+    groups = GroupSessions({browser1, browser2});
+    Check(VolumePercent(groups[0].volume) == 20 && !groups[0].mixed,
+          "sessions on different outputs group by their displayed level");
+    browser2.outputVolume = 0.4f;
+    groups = GroupSessions({browser1, browser2});
+    Check(VolumePercent(groups[0].volume) == 20 && groups[0].mixed,
+          "a mixed group displays the highest output-adjusted session level");
+    Check(AppSliderVolume(2.0f, 0.5f) == 0.5f && SessionVolumeForSlider(2.0f, 0.5f) == 1.0f,
+          "linked slider conversions stay in range");
+    Check(AppSliderVolume(std::numeric_limits<float>::quiet_NaN(), 1.0f) == 0.0f &&
+          SessionVolumeForSlider(1.0f, std::numeric_limits<float>::infinity()) == 0.0f,
+          "linked slider conversions reject non-finite values");
     Check(VolumePercent(0.725f) == 73, "percentages round consistently");
     Check(VolumePercent(-1.0f) == 0 && VolumePercent(2.0f) == 100, "percentages are bounded");
     Check(VolumePercent(std::numeric_limits<float>::quiet_NaN()) == 0, "invalid volume data is safe");

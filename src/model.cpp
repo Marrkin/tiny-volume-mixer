@@ -27,6 +27,7 @@ std::wstring GroupId(const SessionInfo& session) {
 std::vector<AppVolume> GroupSessions(const std::vector<SessionInfo>& sessions) {
     std::map<std::wstring, AppVolume> groups;
     for (const auto& session : sessions) {
+        const auto level = AppSliderVolume(session.volume, session.outputVolume);
         const auto key = GroupId(session);
         const auto [it, inserted] = groups.try_emplace(key);
         auto& app = it->second;
@@ -35,12 +36,12 @@ std::vector<AppVolume> GroupSessions(const std::vector<SessionInfo>& sessions) {
             app.name = session.name;
             app.executable = session.executable;
             app.appId = session.appId;
-            app.volume = session.volume;
+            app.volume = level;
             app.muted = session.muted;
         } else {
-            app.mixed = app.mixed || std::abs(app.volume - session.volume) > 0.005f ||
+            app.mixed = app.mixed || std::abs(app.volume - level) > 0.005f ||
                         app.muted != session.muted;
-            app.volume = std::max(app.volume, session.volume);
+            app.volume = std::max(app.volume, level);
             app.muted = app.muted && session.muted;
         }
         app.active = app.active || session.active;
@@ -55,6 +56,16 @@ std::vector<AppVolume> GroupSessions(const std::vector<SessionInfo>& sessions) {
         return aName == bName ? a.id < b.id : aName < bName;
     });
     return result;
+}
+
+float AppSliderVolume(float sessionVolume, float outputVolume) {
+    if (!std::isfinite(sessionVolume) || !std::isfinite(outputVolume)) return 0.0f;
+    return std::clamp(sessionVolume, 0.0f, 1.0f) * std::clamp(outputVolume, 0.0f, 1.0f);
+}
+
+float SessionVolumeForSlider(float sliderVolume, float outputVolume) {
+    if (!std::isfinite(sliderVolume) || !std::isfinite(outputVolume) || outputVolume <= 0.0f) return 0.0f;
+    return std::clamp(sliderVolume / std::min(outputVolume, 1.0f), 0.0f, 1.0f);
 }
 
 int VolumePercent(float scalar) {

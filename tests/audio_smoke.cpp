@@ -1,9 +1,12 @@
 // A real-device integration test. Only its own silent, temporary audio sessions
-// are changed; the master volume and other applications are never written.
+// are changed in the default mode. --linked-volume also changes output levels
+// and restores the saved output/mute/session levels before returning.
 #include "audio_engine.hpp"
 #include "com_ptr.hpp"
 #include <audioclient.h>
 #include <audiopolicy.h>
+#include <endpointvolume.h>
+#include <algorithm>
 #include <mmdeviceapi.h>
 #include <cmath>
 #include <functional>
@@ -161,6 +164,122 @@ tvm::ComPtr<IMMDevice> AlternateDevice(IMMDeviceEnumerator* enumerator, IMMDevic
     return {};
 }
 
+// The linked-volume mode deliberately exercises output writes. Restore every
+// pre-existing session level as well as output volume/mute, including on failure.
+struct SavedOutput {
+    tvm::ComPtr<IAudioEndpointVolume> endpoint;
+    std::vector<std::pair<tvm::ComPtr<ISimpleAudioVolume>, float>> sessions;
+    float level = 0.0f;
+    BOOL muted = FALSE;
+    bool saved = false;
+    bool Capture(IMMDevice* device) {
+        tvm::ComPtr<IAudioSessionManager2> manager;
+        tvm::ComPtr<IAudioSessionEnumerator> list;
+        if (FAILED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                                   reinterpret_cast<void**>(endpoint.put()))) ||
+            FAILED(endpoint->GetMasterVolumeLevelScalar(&level)) || FAILED(endpoint->GetMute(&muted)) ||
+            FAILED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
+                                   reinterpret_cast<void**>(manager.put()))) ||
+            FAILED(manager->GetSessionEnumerator(list.put()))) return false;
+        int count = 0;
+        if (FAILED(list->GetCount(&count))) return false;
+        for (int i = 0; i < count; ++i) {
+            tvm::ComPtr<IAudioSessionControl> control;
+            tvm::ComPtr<ISimpleAudioVolume> volume;
+            float value = 0.0f;
+            if (FAILED(list->GetSession(i, control.put())) ||
+                FAILED(control->QueryInterface(IID_PPV_ARGS(volume.put()))) ||
+                FAILED(volume->GetMasterVolume(&value))) return false;
+            sessions.emplace_back(std::move(volume), value);
+        }
+        saved = true;
+        return true;
+    }
+    bool Restore() {
+        if (!saved) return true;
+        float current = 0.0f;
+        bool ok = SUCCEEDED(endpoint->GetMasterVolumeLevelScalar(&current));
+        if (ok) ok = SUCCEEDED(endpoint->SetMasterVolumeLevelScalar(std::min(current, level), nullptr));
+        for (const auto& [volume, value] : sessions) {
+            if (FAILED(volume->SetMasterVolume(value, nullptr))) ok = false;
+        }
+        if (FAILED(endpoint->SetMute(muted, nullptr))) ok = false;
+        if (FAILED(endpoint->SetMasterVolumeLevelScalar(level, nullptr))) ok = false;
+        if (ok) saved = false;
+        return ok;
+    }
+    ~SavedOutput() { if (!Restore()) std::cerr << "FAIL: restoring saved output/session levels\n"; }
+};
+
+int RunLinkedVolume(IMMDevice* device) {
+    Producer producer;
+    if (!producer.Start()) return 1;
+    const auto window = CreateWindowExW(0, L"STATIC", L"TVM linked volume test", 0,
+                                       0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
+    tvm::AudioEngine engine;
+    int result = 0;
+    const auto check = [&](bool passed, const char* label) {
+        std::cout << (passed ? "PASS: " : "FAIL: ") << label << std::endl;
+        if (!passed) result = 1;
+        return passed;
+    };
+    std::wstring executable(32768, L'\0');
+    executable.resize(GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size())));
+    tvm::SessionInfo identity; identity.executable = executable;
+    const auto id = tvm::GroupId(identity);
+    const auto find = [&](const tvm::AudioSnapshot& s) -> const tvm::AppVolume* {
+        for (const auto& app : s.apps) if (app.id == id) return &app;
+        return nullptr;
+    };
+    if (!check(engine.Start(window) && Await(engine, [&](const auto& s) {
+        const auto* app = find(s); return s.deviceAvailable && app && app->sessionCount == 2;
+    }), "linked-volume test discovers its silent streams")) {
+        engine.Stop(); DestroyWindow(window); return 1;
+    }
+    SavedOutput saved;
+    if (!check(saved.Capture(device), "original output and session levels are saved")) {
+        engine.Stop(); DestroyWindow(window); return 1;
+    }
+    producer.Send('v');
+    const auto set = [&](const std::wstring& target, float level, int expectedMaster, int expectedApp) {
+        const auto request = engine.SetVolume(target, level);
+        return Await(engine, [&](const auto& s) {
+            const auto* app = find(s);
+            return s.lastAppliedCommand >= request && s.error.empty() && app &&
+                tvm::VolumePercent(s.masterVolume) == expectedMaster &&
+                tvm::VolumePercent(app->volume) == expectedApp;
+        });
+    };
+    check(set(tvm::kMasterId, 0.5f, 50, 34), "master at 50 scales the 67-percent session to 34");
+    check(set(id, 0.2f, 50, 20) && ConfirmVolumes(device, producer.process.dwProcessId, 0.4f),
+          "app at 20 with master at 50 writes relative session level 40");
+    const auto before = engine.Snapshot();
+    check(set(id, 0.8f, 80, 80), "raising an app past the master raises the master to 80");
+    const auto after = engine.Snapshot();
+    bool held = true;
+    for (const auto& old : before.apps) {
+        if (old.id == id) continue;
+        const auto it = std::find_if(after.apps.begin(), after.apps.end(), [&](const auto& app) { return app.id == old.id; });
+        if (it != after.apps.end() && std::abs(it->volume - old.volume) > 0.005f) held = false;
+    }
+    check(held, "other apps retain their displayed levels when an app raises the master");
+    check(set(tvm::kMasterId, 0.3f, 30, 30), "lowering the master pulls the app slider down");
+    check(set(tvm::kMasterId, 0.0f, 0, 0), "master at zero brings app sliders to zero");
+    check(set(tvm::kMasterId, 0.5f, 50, 50), "restoring the master from zero preserves the session ratio");
+    check(SUCCEEDED(saved.endpoint->SetMasterVolumeLevelScalar(0.25f, nullptr)) &&
+          Await(engine, [&](const auto& s) { const auto* app = find(s); return app &&
+              tvm::VolumePercent(s.masterVolume) == 25 && tvm::VolumePercent(app->volume) == 25; }),
+          "external output changes update app sliders through notifications");
+    check(set(id, 0.0f, 25, 0) && ConfirmVolumes(device, producer.process.dwProcessId, 0.0f),
+          "an app can be silenced without changing the master");
+    check(set(tvm::kMasterId, 0.0f, 0, 0) && set(id, 0.15f, 15, 15),
+          "raising an app from a zero master remains finite and raises its output");
+    engine.Stop();
+    check(saved.Restore(), "original output, mute, and session levels are restored");
+    DestroyWindow(window);
+    return result;
+}
+
 int Run(const std::string& mode) {
     tvm::ComPtr<IMMDeviceEnumerator> enumerator;
     tvm::ComPtr<IMMDevice> device;
@@ -171,11 +290,23 @@ int Run(const std::string& mode) {
         return 77;
     }
     if (mode == "--producer") return Produce(device.get());
+    if (mode == "--linked-volume") return RunLinkedVolume(device.get());
     if (mode == "--producer-aux") {
         const auto alternate = AlternateDevice(enumerator.get(),device.get());
         if (!alternate) return 77;
         return Produce(alternate.get()) == 0 ? 0 : 77;
     }
+    tvm::ComPtr<IAudioEndpointVolume> endpoint;
+    float outputLevel = 0.0f;
+    if (FAILED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                               reinterpret_cast<void**>(endpoint.put()))) ||
+        FAILED(endpoint->GetMasterVolumeLevelScalar(&outputLevel)) || outputLevel <= 0.0f) {
+        std::cout << "SKIP: a nonzero output is needed for session-only checks.\n";
+        return 77;
+    }
+    const auto expectedPercent = [outputLevel](float relative) {
+        return tvm::VolumePercent(tvm::AppSliderVolume(relative, outputLevel));
+    };
     int result = 0;
     const auto window = CreateWindowExW(0, L"STATIC", L"TVM audio test", 0,
                                         0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
@@ -201,35 +332,35 @@ int Run(const std::string& mode) {
                   "creation callbacks discover and group both sessions")) {
             producer.Send('v');
             check(Await(engine, [&](const auto& s) {
-                const auto* app = find(s); return app && app->mixed && tvm::VolumePercent(app->volume) == 67;
+                const auto* app = find(s); return app && tvm::VolumePercent(app->volume) == expectedPercent(0.67f);
             }), "external volume changes reach the UI snapshot");
-            engine.SetVolume(id, 0.41f);
+            engine.SetVolume(id, outputLevel * 0.41f);
             check(Await(engine, [&](const auto& s) {
-                const auto* app = find(s); return app && !app->mixed && tvm::VolumePercent(app->volume) == 41;
+                const auto* app = find(s); return app && !app->mixed && tvm::VolumePercent(app->volume) == expectedPercent(0.41f);
             }), "one slider updates every session in the group");
             check(ConfirmVolumes(device.get(), producer.process.dwProcessId, 0.41f),
                   "Core Audio confirms the volume in both streams");
             engine.ToggleMute(id);
             check(Await(engine, [&](const auto& s) { const auto* app = find(s); return app && app->muted; }),
                   "group mute is applied");
-            engine.SetVolume(id, 0.52f);
+            engine.SetVolume(id, outputLevel * 0.52f);
             check(Await(engine, [&](const auto& s) {
-                const auto* app = find(s); return app && !app->muted && tvm::VolumePercent(app->volume) == 52;
+                const auto* app = find(s); return app && !app->muted && tvm::VolumePercent(app->volume) == expectedPercent(0.52f);
             }), "raising a slider restores sound");
             engine.Refresh();
-            engine.SetVolume(id, 0.37f);
+            engine.SetVolume(id, outputLevel * 0.37f);
             check(Await(engine, [&](const auto& s) {
                 const auto* app = find(s);
-                return app && app->sessionCount == 2 && tvm::VolumePercent(app->volume) == 37;
+                return app && app->sessionCount == 2 && tvm::VolumePercent(app->volume) == expectedPercent(0.37f);
             }), "writes after rebinding reach both sessions without duplication");
             producer.Send('r');
             check(Await(engine, [&](const auto& s) {
-                const auto* app = find(s); return app && app->sessionCount == 2 && tvm::VolumePercent(app->volume) == 79;
+                const auto* app = find(s); return app && app->sessionCount == 2 && tvm::VolumePercent(app->volume) == expectedPercent(0.79f);
             }), "releasing and reopening streams restores the existing application's controls");
-            const auto request = engine.SetVolume(id,0.65f);
+            const auto request = engine.SetVolume(id,outputLevel * 0.65f);
             check(Await(engine, [&](const auto& s) {
                 const auto* app = find(s);
-                return s.lastAppliedCommand >= request && app && !app->mixed && tvm::VolumePercent(app->volume) == 65;
+                return s.lastAppliedCommand >= request && app && !app->mixed && tvm::VolumePercent(app->volume) == expectedPercent(0.65f);
             }), "volume acknowledgments reflect the latest command after stream reuse");
             const auto alternate = AlternateDevice(enumerator.get(),device.get());
             if (alternate) {
@@ -242,12 +373,19 @@ int Run(const std::string& mode) {
                     DWORD exitCode = STILL_ACTIVE; GetExitCodeProcess(auxiliary.process.hProcess,&exitCode);
                     if (exitCode == 77) std::cout << "SKIP: additional output does not accept shared streams." << std::endl;
                     else if (check(ready && exitCode == STILL_ACTIVE, "sessions on default and non-default outputs share one application row")) {
-                        engine.SetVolume(id,0.61f);
+                        tvm::ComPtr<IAudioEndpointVolume> otherEndpoint;
+                        float otherLevel = 0.0f;
+                        const bool readable = SUCCEEDED(alternate->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL,
+                            nullptr, reinterpret_cast<void**>(otherEndpoint.put()))) &&
+                            SUCCEEDED(otherEndpoint->GetMasterVolumeLevelScalar(&otherLevel));
+                        check(readable, "additional output volume is readable");
+                        const float chosen = std::min(outputLevel, otherLevel) * 0.61f;
+                        engine.SetVolume(id,chosen);
                         check(Await(engine,[&](const auto& s) {
                             const auto* app = find(s);
-                            return app && app->sessionCount == 4 && !app->mixed && tvm::VolumePercent(app->volume) == 61;
+                            return app && app->sessionCount == 4 && !app->mixed && tvm::VolumePercent(app->volume) == tvm::VolumePercent(chosen);
                         }), "one control adjusts sessions across render outputs");
-                        check(ConfirmVolumes(alternate.get(),auxiliary.process.dwProcessId,0.61f),
+                        check(ConfirmVolumes(alternate.get(),auxiliary.process.dwProcessId,tvm::SessionVolumeForSlider(chosen,otherLevel)),
                               "Core Audio confirms writes on the non-default output");
                         auxiliary.Send('q');
                         check(Await(engine,[&](const auto& s) {

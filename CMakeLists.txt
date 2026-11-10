@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(TinyVolumeMixer VERSION 0.2.0 LANGUAGES CXX)
+project(TinyVolumeMixer VERSION 1.0.0 LANGUAGES CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "TinyVolumeMixer targets Windows. Use MSVC or a Windows cross toolchain.")

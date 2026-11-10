@@ -196,6 +196,7 @@ struct AudioEngine::Impl {
         ComPtr<IAudioSessionEvents> sink;
         SessionInfo info;
         std::uint64_t token = 0;
+        std::uint64_t outputToken = 0;
     };
 
     HWND listener = nullptr;
@@ -215,9 +216,12 @@ struct AudioEngine::Impl {
     ComPtr<IAudioEndpointVolumeCallback> endpointSink;
     struct Output {
         ComPtr<IMMDevice> device;
+        ComPtr<IAudioEndpointVolume> volume;
+        ComPtr<IAudioEndpointVolumeCallback> volumeSink;
         ComPtr<IAudioSessionManager2> manager;
         ComPtr<IAudioSessionNotification> sink;
         std::uint64_t token = 0;
+        bool isDefault = false;
     };
     std::vector<Output> outputs;
     std::vector<Session> sessions;
@@ -244,7 +248,20 @@ struct AudioEngine::Impl {
             current.masterMuted = muted != FALSE;
         }
         std::vector<SessionInfo> infos;
+        std::map<std::uint64_t, float> outputVolumes;
+        for (const auto& output : outputs) {
+            if (output.isDefault && current.deviceAvailable) {
+                outputVolumes.emplace(output.token, current.masterVolume);
+                continue;
+            }
+            float level = 0.0f;
+            const auto hr = output.volume->GetMasterVolumeLevelScalar(&level);
+            if (SUCCEEDED(hr)) outputVolumes.emplace(output.token, level);
+            else current.error = ErrorText(L"Não foi possível ler o volume da saída", hr);
+        }
         for (auto& session : sessions) {
+            const auto output = outputVolumes.find(session.outputToken);
+            if (output == outputVolumes.end()) continue;
             AudioSessionState state = AudioSessionStateExpired;
             BOOL muted = FALSE;
             if (FAILED(session.control->GetState(&state)) || state == AudioSessionStateExpired) continue;
@@ -252,7 +269,9 @@ struct AudioEngine::Impl {
                 FAILED(session.volume->GetMute(&muted))) continue;
             session.info.muted = muted != FALSE;
             session.info.active = state == AudioSessionStateActive;
-            infos.push_back(session.info);
+            auto info = session.info;
+            info.outputVolume = output->second;
+            infos.push_back(std::move(info));
         }
         current.apps = GroupSessions(infos);
         {
@@ -297,6 +316,7 @@ struct AudioEngine::Impl {
     void AddSession(IAudioSessionControl* control, std::uint64_t deviceToken) {
         if (!control) return;
         Session session;
+        session.outputToken = deviceToken;
         if (FAILED(control->QueryInterface(IID_PPV_ARGS(session.control.put()))) ||
             FAILED(control->QueryInterface(IID_PPV_ARGS(session.volume.put())))) return;
         AudioSessionState state = AudioSessionStateExpired;
@@ -342,6 +362,7 @@ struct AudioEngine::Impl {
         ++generation; // Drop queued events belonging to the previous endpoint.
         for (auto& output : outputs) {
             if (output.manager && output.sink) output.manager->UnregisterSessionNotification(output.sink.get());
+            if (output.volume && output.volumeSink) output.volume->UnregisterControlChangeNotify(output.volumeSink.get());
         }
         for (auto& session : sessions) {
             session.control->UnregisterAudioSessionNotification(session.sink.get());
@@ -399,12 +420,30 @@ struct AudioEngine::Impl {
         for (UINT index = 0; index < deviceCount; ++index) {
             Output output; output.token = ++nextToken;
             if (FAILED(devices->Item(index, output.device.put()))) continue;
+            hr = output.device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                                        reinterpret_cast<void**>(output.volume.put()));
+            if (FAILED(hr)) { error = ErrorText(L"Não foi possível acessar o volume de uma saída", hr); continue; }
+            // The default output already has a volume subscription. Other outputs
+            // must also notify us when their app sliders need to move.
+            LPWSTR outputId = nullptr, defaultId = nullptr;
+            output.device->GetId(&outputId);
+            if (device) device->GetId(&defaultId);
+            output.isDefault = outputId && defaultId && wcscmp(outputId, defaultId) == 0;
+            CoTaskMemFree(outputId); CoTaskMemFree(defaultId);
             hr = output.device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
                                          reinterpret_cast<void**>(output.manager.put()));
             if (FAILED(hr)) { error = ErrorText(L"Não foi possível acessar uma saída de áudio", hr); continue; }
             output.sink.attach(new CreatedSink(dispatch, generation, output.token));
             hr = output.manager->RegisterSessionNotification(output.sink.get());
             if (FAILED(hr)) { error = ErrorText(L"Não foi possível acompanhar novos aplicativos", hr); continue; }
+            if (!output.isDefault) {
+                output.volumeSink.attach(new EndpointSink(dispatch, generation));
+                hr = output.volume->RegisterControlChangeNotify(output.volumeSink.get());
+                if (FAILED(hr)) {
+                    output.volumeSink.reset();
+                    error = ErrorText(L"Não foi possível acompanhar o volume de uma saída", hr);
+                }
+            }
             outputs.push_back(std::move(output));
             auto& bound = outputs.back();
             ComPtr<IAudioSessionEnumerator> list;
@@ -418,6 +457,47 @@ struct AudioEngine::Impl {
             }
         }
         Publish();
+    }
+
+    HRESULT ApplyAppVolume(Output& output, const Work& work, const std::vector<Session*>& targets) {
+        float oldOutput = 0.0f;
+        auto hr = output.volume->GetMasterVolumeLevelScalar(&oldOutput);
+        if (FAILED(hr)) return hr;
+        const float newOutput = std::max(oldOutput, work.volume);
+        if (newOutput > oldOutput) {
+            // SndVol keeps other apps at the same displayed level when one app
+            // pushes the output higher. Attenuate them before raising the output.
+            std::vector<std::pair<Session*, float>> previous;
+            for (auto& session : sessions) {
+                if (session.outputToken != output.token || GroupId(session.info) == work.id) continue;
+                AudioSessionState state = AudioSessionStateExpired;
+                if (FAILED(session.control->GetState(&state)) || state == AudioSessionStateExpired) continue;
+                float level = 0.0f;
+                hr = session.volume->GetMasterVolume(&level);
+                if (FAILED(hr)) break;
+                previous.emplace_back(&session, level);
+            }
+            if (FAILED(hr)) return hr;
+            for (const auto& [session, level] : previous) {
+                hr = session->volume->SetMasterVolume(
+                    SessionVolumeForSlider(AppSliderVolume(level, oldOutput), newOutput), &kContext);
+                if (FAILED(hr)) break;
+            }
+            if (SUCCEEDED(hr)) hr = output.volume->SetMasterVolumeLevelScalar(newOutput, &kContext);
+            if (FAILED(hr)) {
+                for (const auto& [session, level] : previous) session->volume->SetMasterVolume(level, &kContext);
+                return hr;
+            }
+        }
+        HRESULT result = S_OK;
+        const auto relative = SessionVolumeForSlider(work.volume, newOutput);
+        for (auto* session : targets) {
+            if (session->outputToken != output.token) continue;
+            hr = session->volume->SetMasterVolume(relative, &kContext);
+            if (SUCCEEDED(hr) && work.volume > 0.0f) hr = session->volume->SetMute(FALSE, &kContext);
+            if (FAILED(hr)) result = hr;
+        }
+        return result;
     }
 
     void Apply(const Work& work) {
@@ -445,14 +525,17 @@ struct AudioEngine::Impl {
                 targets.push_back(&session);
             }
             if (targets.empty()) result = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-            for (auto* session : targets) {
-                auto hr = work.kind == WorkKind::Volume
-                    ? session->volume->SetMasterVolume(work.volume, &kContext)
-                    : session->volume->SetMute(!allMuted, &kContext);
-                if (SUCCEEDED(hr) && work.kind == WorkKind::Volume && work.volume > 0.0f) {
-                    hr = session->volume->SetMute(FALSE, &kContext);
+            if (work.kind == WorkKind::Volume) {
+                for (auto& output : outputs) {
+                    if (std::none_of(targets.begin(), targets.end(), [&](const auto* s) { return s->outputToken == output.token; })) continue;
+                    const auto hr = ApplyAppVolume(output, work, targets);
+                    if (FAILED(hr)) result = hr;
                 }
-                if (FAILED(hr)) result = hr;
+            } else {
+                for (auto* session : targets) {
+                    const auto hr = session->volume->SetMute(!allMuted, &kContext);
+                    if (FAILED(hr)) result = hr;
+                }
             }
         }
         error = FAILED(result) ? ErrorText(L"Não foi possível alterar o volume", result) : L"";
